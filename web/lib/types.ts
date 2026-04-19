@@ -5,9 +5,11 @@ export type PatternAccount = {
   billing_date?: string;
   patterns?: Array<{
     label?: string;
-    regex: string;
+    regex: string[];
     map: Record<string, string>;
   }>;
+  regex?: string[];
+  map?: Record<string, string>;
 };
 
 export type Transaction = {

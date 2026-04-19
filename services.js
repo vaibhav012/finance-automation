@@ -7,9 +7,11 @@ const axios = require('axios');
 const { PATTERNS_FILE } = require('./constants');
 const db = require('./db');
 
-/** Build matcher from JSON: string regex + map with "{{n}}" capture placeholders */
+/** Build matcher from JSON: regex pattern(s) + map with "{{n}}" capture placeholders */
 function hydrateMatcher(account, matcher, matcherIndex = 0) {
-    const regex = typeof matcher.regex === 'string' ? new RegExp(matcher.regex) : matcher.regex;
+    const regexes = Array.isArray(matcher.regex)
+        ? matcher.regex.map((pattern) => (typeof pattern === 'string' ? new RegExp(pattern) : pattern))
+        : [typeof matcher.regex === 'string' ? new RegExp(matcher.regex) : matcher.regex];
     const mapTemplate = matcher.map;
     const map =
         typeof mapTemplate === 'function'
@@ -30,7 +32,7 @@ function hydrateMatcher(account, matcher, matcherIndex = 0) {
     return {
         ...account,
         ...matcher,
-        regex,
+        regexes,
         map,
         matcherName,
         matcherIndex
@@ -107,7 +109,7 @@ async function getTransactions(auth) {
     try {
         res = await gmail.users.messages.list({
             userId: 'me',
-            q: 'subject:(Transaction OR Alert OR Debit OR Credit) after:2026/03/01',
+            q: 'subject:(Transaction OR Alert OR Debit OR Credit OR UPI) after:2026/03/01',
         });
     } catch (error) {
         if (!isLoginRequiredError(error)) throw error;
@@ -150,7 +152,9 @@ async function getTransactions(auth) {
 
         let found = false;
         for (const pattern of BANK_PATTERNS) {
-            const match = body.match(pattern.regex);
+            const match = pattern.regexes
+                .map((regex) => body.match(regex))
+                .find(Boolean);
             if (match) {
                 const accountId = `${pattern.name}_${pattern.type}_${pattern.ending_number}`;
                 parsedResults.push({
