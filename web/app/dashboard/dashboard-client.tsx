@@ -1,6 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useMemo } from 'react';
 import { accountDerivedId } from '@/lib/derive';
 import { getCurrentCycleRange, getLastCycleRange } from '@/lib/billing';
 import type { PatternAccount, Report, Transaction } from '@/lib/types';
@@ -36,6 +38,26 @@ function chipClasses(active: boolean) {
     : 'border-neutral-300 bg-white text-neutral-700 hover:bg-neutral-50';
 }
 
+function parseAmount(amount?: string): number {
+  if (!amount) return 0;
+  const value = Number(String(amount).replaceAll(',', '').trim());
+  return Number.isFinite(value) ? value : 0;
+}
+
+function formatCurrency(amount: number): string {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(amount);
+}
+
+function accountLabel(account: PatternAccount | undefined, accountId: string): string {
+  if (!account) return accountId;
+  return `${account.name} (${account.type.toUpperCase()})`;
+}
+
 export default function DashboardClient({
   report,
   patterns
@@ -43,19 +65,73 @@ export default function DashboardClient({
   report: Report;
   patterns: PatternAccount[];
 }) {
-  const [accountId, setAccountId] = useState<string>('ALL');
-  const [timeRange, setTimeRange] = useState<TimeRange>('all');
-
   const now = useMemo(() => new Date(), []);
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const accountsById = useMemo(() => {
+    return new Map(patterns.map((pattern) => [accountDerivedId(pattern), pattern]));
+  }, [patterns]);
+
+  const accountIds = useMemo(() => {
+    const ids = patterns.map((pattern) => accountDerivedId(pattern));
+    const extras = report.transactions
+      .map((transaction) => `${transaction.accountId}`.toLowerCase())
+      .filter((id) => !ids.includes(id));
+    return [...ids, ...extras];
+  }, [patterns, report.transactions]);
+
+  const accountId = useMemo(() => {
+    const candidate = searchParams.get('account')?.toLowerCase();
+    if (candidate && accountIds.includes(candidate)) return candidate;
+    return 'ALL';
+  }, [accountIds, searchParams]);
+
+  const timeRange = useMemo<TimeRange>(() => {
+    const candidate = searchParams.get('range');
+    if (candidate === 'current' || candidate === 'last' || candidate === 'all') {
+      return candidate;
+    }
+    return 'all';
+  }, [searchParams]);
+
+  const hrefForFilters = (
+    nextAccountId: string,
+    nextTimeRange: TimeRange
+  ): string => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextAccountId === 'ALL') {
+      params.delete('account');
+    } else {
+      params.set('account', nextAccountId);
+    }
+
+    if (nextTimeRange === 'all') {
+      params.delete('range');
+    } else {
+      params.set('range', nextTimeRange);
+    }
+
+    const query = params.toString();
+    return query ? `${pathname}?${query}` : pathname;
+  };
+
+  const setFilters = (nextAccountId: string, nextTimeRange: TimeRange) => {
+    router.replace(hrefForFilters(nextAccountId, nextTimeRange), {
+      scroll: false
+    });
+  };
 
   const cycleHint = useMemo(() => {
     if (timeRange === 'all') return '';
-    const bd =
-      accountId === 'ALL'
-        ? patterns[0]
-          ? billingDayForAccount(accountDerivedId(patterns[0]), patterns)
-          : 1
-        : billingDayForAccount(accountId, patterns);
+    if (accountId === 'ALL') {
+      return timeRange === 'current'
+        ? 'Current cycle uses each account’s own billing day.'
+        : 'Last cycle uses each account’s own billing day.';
+    }
+
+    const bd = billingDayForAccount(accountId, patterns);
     if (timeRange === 'current') {
       const { start, end } = getCurrentCycleRange(now, bd);
       return `Current cycle: ${start.toLocaleDateString()} – ${end.toLocaleDateString()} (billing day ${bd}).`;
@@ -83,6 +159,47 @@ export default function DashboardClient({
     });
   }, [report.transactions, accountId, timeRange, patterns, now]);
 
+  const currentCycleSummary = useMemo(() => {
+    const totals = new Map<
+      string,
+      { spent: number; credit: number; net: number }
+    >();
+
+    for (const id of accountIds) {
+      totals.set(id, { spent: 0, credit: 0, net: 0 });
+    }
+
+    for (const transaction of report.transactions) {
+      const id = `${transaction.accountId}`.toLowerCase();
+      const ms = txEpochMs(transaction);
+      if (ms == null) continue;
+
+      const bd = billingDayForAccount(id, patterns);
+      const range = getCurrentCycleRange(now, bd);
+      if (ms < range.start.getTime() || ms > range.end.getTime()) continue;
+
+      const amount = parseAmount(transaction.amount);
+      const entry = totals.get(id) ?? { spent: 0, credit: 0, net: 0 };
+      if (transaction.type === 'Credit') {
+        entry.credit += amount;
+      } else {
+        entry.spent += amount;
+      }
+      entry.net = entry.spent - entry.credit;
+      totals.set(id, entry);
+    }
+
+    return accountIds.map((id) => {
+      const account = accountsById.get(id);
+      const total = totals.get(id) ?? { spent: 0, credit: 0, net: 0 };
+      return {
+        accountId: id,
+        label: accountLabel(account, id),
+        ...total
+      };
+    });
+  }, [accountIds, accountsById, now, patterns, report.transactions]);
+
   return (
     <div className="mx-auto max-w-5xl px-4 pb-10 pt-10">
       <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -97,6 +214,55 @@ export default function DashboardClient({
           })}
         </p>
       </div>
+
+      <section className="mb-6 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+        <div className="border-b border-neutral-200 px-4 py-4 sm:px-5">
+          <h2 className="text-base font-semibold text-neutral-900">
+            Current Billing Cycle
+          </h2>
+          <p className="mt-1 text-sm text-neutral-500">
+            Select an account to open the ledger with the current-cycle filter applied.
+          </p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b border-neutral-200 bg-neutral-50 text-xs font-semibold uppercase tracking-wide text-neutral-600">
+                <th className="px-4 py-3 sm:px-5">Account</th>
+                <th className="px-4 py-3 text-right sm:px-5">Total Spent</th>
+                <th className="px-4 py-3 text-right sm:px-5">Total Credit</th>
+                <th className="px-4 py-3 text-right sm:px-5">Net Balance</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-neutral-100">
+              {currentCycleSummary.map((row) => (
+                <tr
+                  key={row.accountId}
+                  className="transition-colors hover:bg-neutral-50"
+                >
+                  <td className="px-4 py-3 font-medium text-neutral-900 sm:px-5">
+                    <Link
+                      href={hrefForFilters(row.accountId, 'current')}
+                      className="inline-flex rounded-md px-1 py-0.5 text-neutral-900 underline-offset-4 hover:text-neutral-700 hover:underline"
+                    >
+                      {row.label}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 text-right font-medium text-neutral-900 sm:px-5">
+                    {formatCurrency(row.spent)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-medium text-emerald-700 sm:px-5">
+                    {formatCurrency(row.credit)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold text-neutral-900 sm:px-5">
+                    {formatCurrency(row.net)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
       <section className="mb-4">
         <h2 className="mb-2 text-[0.7rem] font-bold uppercase tracking-wide text-neutral-500">
@@ -113,7 +279,7 @@ export default function DashboardClient({
             <button
               key={key}
               type="button"
-              onClick={() => setTimeRange(key)}
+              onClick={() => setFilters(accountId, key)}
               className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${chipClasses(timeRange === key)}`}
             >
               {label}
@@ -132,7 +298,7 @@ export default function DashboardClient({
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setAccountId('ALL')}
+            onClick={() => setFilters('ALL', timeRange)}
             className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${chipClasses(accountId === 'ALL')}`}
           >
             All Transactions
@@ -143,7 +309,7 @@ export default function DashboardClient({
               <button
                 key={`${id}-${idx}`}
                 type="button"
-                onClick={() => setAccountId(id)}
+                onClick={() => setFilters(id, timeRange)}
                 className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${chipClasses(accountId === id)}`}
               >
                 {acc.name} ({acc.type})
