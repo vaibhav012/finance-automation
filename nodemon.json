@@ -1,0 +1,8 @@
+{
+  "ignore": [
+    "parsed_transactions.json",
+    "token.json",
+    "node_modules"
+  ],
+  "ext": "js,html,json"
+}

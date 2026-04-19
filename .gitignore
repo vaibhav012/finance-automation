@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+db/
 
 # Environment and secrets
 .env
